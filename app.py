@@ -26,13 +26,13 @@ if uploaded_files:
                     if skip:
                         skip = False
                         continue
-                    if line.strip().endswith("°C /") and i+1 < len(lines):
-                        fixed_lines.append(line + " " + lines[i+1])
+                    if line.strip().endswith("°C /") and i + 1 < len(lines):
+                        fixed_lines.append(line + " " + lines[i + 1])
                         skip = True
                     else:
                         fixed_lines.append(line)
 
-                # Parse device ranges
+                # Parse device ranges (for freezers/fridges)
                 device_ranges = {}
                 for line in fixed_lines:
                     if "Device:" in line and "°C" in line and "to" in line:
@@ -51,12 +51,27 @@ if uploaded_files:
                             date = " ".join(parts[1:4])   # e.g. "23 Mar 25"
                             time = parts[4]              # e.g. "08:03:01"
                             temp_match = re.search(r"([\-]?\d+\.\d+)\s*°C", line)
+
                             if temp_match:
                                 temp = float(temp_match.group(1))
                                 low, high = device_ranges.get(device, (None, None))
                                 status = "OK"
-                                if low is not None and (temp < low or temp > high):
-                                    status = "❌ OUT OF RANGE"
+
+                                # --- Ambient/Room Devices → fixed rules ---
+                                if "Ambient" in line or "Room" in line:
+                                    low, high = 15.0, 30.0
+                                    if 20.0 <= temp <= 25.0:
+                                        status = "OK"
+                                    elif 15.0 <= temp < 20.0 or 25.0 < temp <= 30.0:
+                                        status = "⚠️ Excursion"
+                                    else:
+                                        status = "❌ Out of Range"
+
+                                # --- Freezer/Fridge Devices → PDF ranges ---
+                                else:
+                                    if low is not None and (temp < low or temp > high):
+                                        status = "❌ Out of Range"
+
                                 all_records.append([
                                     uploaded_file.name, device, date, time, temp, low, high, status
                                 ])
@@ -70,8 +85,7 @@ if uploaded_files:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="All Records", index=False)
-        # optional: separate sheet for only out-of-range
-        df[df["Status"] == "❌ OUT OF RANGE"].to_excel(writer, sheet_name="Out of Range", index=False)
+        df[df["Status"].str.contains("Out of Range|Excursion")].to_excel(writer, sheet_name="Alerts", index=False)
 
     st.success("✅ Processing complete!")
     st.download_button(
