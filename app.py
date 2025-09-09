@@ -17,9 +17,13 @@ if uploaded_files:
     for uploaded_file in uploaded_files:
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
-                lines = page.extract_text().split("\n")
+                text = page.extract_text()
+                if not text:
+                    continue
 
-                # Fix broken lines where °C / splits
+                lines = text.split("\n")
+
+                # --- Fix broken lines like "2.78 °C /" + "37.0 °F"
                 fixed_lines = []
                 skip = False
                 for i, line in enumerate(lines):
@@ -32,33 +36,33 @@ if uploaded_files:
                     else:
                         fixed_lines.append(line)
 
-                # Parse device ranges (for freezers/fridges)
+                # --- Parse device ranges from "nullRange"
                 device_ranges = {}
-                for line in fixed_lines:
-                    if "Device:" in line and "°C" in line and "to" in line:
+                for i, line in enumerate(fixed_lines):
+                    if "nullRange:" in line and "Device:" in fixed_lines[i + 1]:
                         range_match = re.findall(r"([\-]?\d+\.\d+)\s*°C", line)
-                        dev_match = re.search(r"(FAC-\d+)", line)
+                        dev_match = re.search(r"(FAC[0-9A-Z\-]+)", fixed_lines[i + 1])
                         if range_match and dev_match:
                             low, high = map(float, range_match[:2])
                             device_ranges[dev_match.group(1)] = (low, high)
 
-                # Parse records
+                # --- Parse temperature records
                 for line in fixed_lines:
-                    if line.startswith("FAC-"):
+                    if line.startswith("FAC-") or line.startswith("FAC"):
                         parts = line.split()
                         if len(parts) >= 7:
                             device = parts[0]
-                            date = " ".join(parts[1:4])   # e.g. "23 Mar 25"
-                            time = parts[4]              # e.g. "08:03:01"
-                            temp_match = re.search(r"([\-]?\d+\.\d+)\s*°C", line)
+                            date = " ".join(parts[1:4])   # e.g. "04 Dec 22"
+                            time = parts[4]              # e.g. "08:02:33"
 
+                            temp_match = re.search(r"([\-]?\d+\.\d+)\s*°C", line)
                             if temp_match:
                                 temp = float(temp_match.group(1))
                                 low, high = device_ranges.get(device, (None, None))
                                 status = "OK"
 
-                                # --- Ambient/Room Devices → fixed rules ---
-                                if "Ambient" in line or "Room" in line:
+                                # --- Apply rules ---
+                                if "AMB" in device:  # Ambient device
                                     low, high = 15.0, 30.0
                                     if 20.0 <= temp <= 25.0:
                                         status = "OK"
@@ -67,8 +71,11 @@ if uploaded_files:
                                     else:
                                         status = "❌ Out of Range"
 
-                                # --- Freezer/Fridge Devices → PDF ranges ---
-                                else:
+                                elif "REF" in device:  # Fridge
+                                    if low is not None and (temp < low or temp > high):
+                                        status = "❌ Out of Range"
+
+                                else:  # Freezer or other devices
                                     if low is not None and (temp < low or temp > high):
                                         status = "❌ Out of Range"
 
@@ -76,16 +83,18 @@ if uploaded_files:
                                     uploaded_file.name, device, date, time, temp, low, high, status
                                 ])
 
-    # Convert to DataFrame
+    # --- Convert to DataFrame ---
     df = pd.DataFrame(all_records, columns=[
         "File", "Device", "Date", "Time", "Temperature (°C)", "Low Limit", "High Limit", "Status"
     ])
 
-    # Save to Excel in memory
+    # --- Save to Excel in memory ---
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="All Records", index=False)
-        df[df["Status"].str.contains("Out of Range|Excursion")].to_excel(writer, sheet_name="Alerts", index=False)
+        df[df["Status"].str.contains("Out of Range|Excursion")].to_excel(
+            writer, sheet_name="Alerts", index=False
+        )
 
     st.success("✅ Processing complete!")
     st.download_button(
